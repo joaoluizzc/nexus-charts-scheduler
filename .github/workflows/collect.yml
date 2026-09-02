@@ -1,0 +1,70 @@
+name: Nexus Charts 24/7 Collector
+
+on:
+  schedule:
+    - cron: "2/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nexus-charts-audience-collector
+  cancel-in-progress: true
+
+jobs:
+  collect:
+    runs-on: ubuntu-slim
+    timeout-minutes: 7
+    steps:
+      - name: Collect audience every minute
+        shell: bash
+        env:
+          COLLECTOR_URL: ${{ secrets.COLLECTOR_URL }}
+          COLLECTOR_TOKEN: ${{ secrets.COLLECTOR_TOKEN }}
+          SITES_BYPASS_TOKEN: ${{ secrets.SITES_BYPASS_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          for cycle in 1 2 3 4 5; do
+            started_at="$(date +%s)"
+            response_file="$(mktemp)"
+
+            http_code="$(curl \
+              --silent \
+              --show-error \
+              --retry 2 \
+              --retry-all-errors \
+              --connect-timeout 15 \
+              --max-time 110 \
+              --request POST \
+              --header "Authorization: Bearer ${COLLECTOR_TOKEN}" \
+              --header "OAI-Sites-Authorization: Bearer ${SITES_BYPASS_TOKEN}" \
+              --output "${response_file}" \
+              --write-out "%{http_code}" \
+              "${COLLECTOR_URL}")"
+
+            if [[ "${http_code}" != "200" ]]; then
+              echo "Collector returned HTTP ${http_code} on cycle ${cycle}."
+              rm -f "${response_file}"
+              exit 1
+            fi
+
+            if ! grep -q '"status"' "${response_file}"; then
+              echo "Collector returned an invalid response on cycle ${cycle}."
+              rm -f "${response_file}"
+              exit 1
+            fi
+
+            rm -f "${response_file}"
+            echo "Cycle ${cycle}/5 completed successfully."
+
+            if [[ "${cycle}" -lt 5 ]]; then
+              elapsed="$(( $(date +%s) - started_at ))"
+              wait_seconds="$(( 60 - elapsed ))"
+              if [[ "${wait_seconds}" -lt 5 ]]; then
+                wait_seconds=5
+              fi
+              sleep "${wait_seconds}"
+            fi
+          done
